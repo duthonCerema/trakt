@@ -24,9 +24,8 @@
       padding: 24px 16px;
     }
 
-    h1 {
+    h1, h3 {
       margin-top: 0;
-      font-size: 1.8rem;
     }
 
     .status-bar {
@@ -90,13 +89,35 @@
     .movie-card {
       display: flex;
       align-items: center;
-      justify-content: space-between;
       background: var(--card-bg);
       border: 1px solid var(--border);
       margin-top: 12px;
       padding: 14px 18px;
       border-radius: 6px;
       gap: 16px;
+    }
+
+    .poster-img {
+      width: 50px;
+      height: 75px;
+      object-fit: cover;
+      border-radius: 4px;
+      background-color: #2a2a2a;
+      flex-shrink: 0;
+    }
+
+    .poster-placeholder {
+      width: 50px;
+      height: 75px;
+      border-radius: 4px;
+      background: #2a2a2a;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.7rem;
+      color: var(--text-muted);
+      text-align: center;
+      flex-shrink: 0;
     }
 
     .movie-info {
@@ -119,6 +140,21 @@
       gap: 8px;
       flex-wrap: wrap;
     }
+
+    .manual-section {
+      margin-top: 40px;
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      padding: 18px;
+      border-radius: 6px;
+    }
+
+    .manual-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+    }
   </style>
 </head>
 <body>
@@ -138,26 +174,35 @@
 
     <h3 style="margin-top: 32px;">2. Valider et ajouter aux listes</h3>
     <div id="results"></div>
+
+    <div class="manual-section" id="manual-section">
+      <div class="manual-header">
+        <h3>3. Films à traiter à la main (<span id="unmatched-count">0</span>)</h3>
+        <button class="btn-secondary" id="copy-btn" onclick="copyUnmatched()">Copier la liste</button>
+      </div>
+      <textarea id="unmatched-list" readonly placeholder="Les films marqués 'Non exact' ou non trouvés apparaîtront ici..."></textarea>
+    </div>
   </div>
 
   <script>
     // =========================================================================
     // CONFIGURATION : Renseigne ton Client ID et les slugs de tes 3 listes ici
     // =========================================================================
-    const TRAKT_CLIENT_ID = 'THw7wcXY0MTrPjxJtDPxHtjxnyPptVcz5Eiwg3OfmNM';
+    const TRAKT_CLIENT_ID = 'TON_CLIENT_ID_ICI';
     const LIST_1_SLUG     = 'pierre';
     const LIST_2_SLUG     = 'maeva';
     const LIST_3_SLUG     = 'enfants';
 
-    // Label affiché sur les boutons (personnalisable)
+    // Label affiché sur les boutons
     const LIST_1_LABEL    = 'Pierre';
     const LIST_2_LABEL    = 'Maëva';
     const LIST_3_LABEL    = 'Enfants';
     // =========================================================================
 
     const REDIRECT_URI = window.location.href.split('?')[0].split('#')[0];
+    const unmatchedMovies = new Set();
 
-    // Outillage Crypto pour le flux OAuth2 PKCE
+    // Outillage Crypto pour PKCE
     function generateRandomString(length) {
       const possible = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~';
       const values = crypto.getRandomValues(new Uint8Array(length));
@@ -180,16 +225,15 @@
       return base64urlencode(hashed);
     }
 
-    // Gestion de l'authentification OAuth2 PKCE
+    // Authentification Trakt
     async function initAuth() {
       const urlParams = new URLSearchParams(window.location.search);
       const code = urlParams.get('code');
       const token = localStorage.getItem('trakt_token');
       const statusText = document.getElementById('status-text');
-      const authBtn = document.getElementById('auth-btn');
 
       if (code) {
-        statusText.innerText = "Validation du code d'autorisation Trakt...";
+        statusText.innerText = "Validation du code d'autorisation...";
         const verifier = localStorage.getItem('pkce_verifier');
 
         try {
@@ -261,6 +305,8 @@
       const lines = document.getElementById('raw-list').value.split('\n').filter(l => l.trim() !== '');
       const resultsDiv = document.getElementById('results');
       resultsDiv.innerHTML = '';
+      unmatchedMovies.clear();
+      updateUnmatchedTextarea();
 
       if (lines.length === 0) {
         alert("Veuillez saisir au moins un nom de film.");
@@ -269,13 +315,14 @@
 
       for (const line of lines) {
         const movie = await searchMovie(line.trim());
-        renderMovieCard(line, movie);
+        renderMovieCard(line.trim(), movie);
       }
     };
 
+    // API Search avec extended=full pour tenter d'obtenir les visuels si dispo
     async function searchMovie(query) {
       try {
-        const res = await fetch(`https://api.trakt.tv/search/movie?query=${encodeURIComponent(query)}`, {
+        const res = await fetch(`https://api.trakt.tv/search/movie?query=${encodeURIComponent(query)}&extended=full`, {
           headers: {
             'Content-Type': 'application/json',
             'trakt-api-version': '2',
@@ -294,7 +341,9 @@
       div.className = 'movie-card';
 
       if (!match) {
+        addUnmatched(originalQuery);
         div.innerHTML = `
+          <div class="poster-placeholder">Sans poster</div>
           <div class="movie-info">
             <div class="movie-title">"${originalQuery}"</div>
             <div class="query-tag" style="color:#ff6b6b;">Aucune correspondance trouvée sur Trakt</div>
@@ -304,7 +353,18 @@
           </div>
         `;
       } else {
+        // Trakt fournit les identifiants TMDB / IMDB si besoin
+        const posterUrl = match.ids.tmdb 
+          ? `https://image.tmdb.org/t/p/w185_and_h278_bestv2${match.ids.tmdb}` // Fallback structure si nécessaire
+          : null;
+
+        // Construction de la vignette avec TMDB via l'ID Trakt (CDN TMDB gratuit)
+        const imgHTML = match.ids.tmdb
+          ? `<img class="poster-img" src="https://media.themoviedb.org/t/p/w92${getTmdbPosterPath(match)}" onerror="this.onerror=null; this.replaceWith(createPlaceholder())" alt="Affiche">`
+          : `<div class="poster-placeholder">Sans image</div>`;
+
         div.innerHTML = `
+          ${imgHTML}
           <div class="movie-info">
             <div class="movie-title">${match.title} <span style="color:var(--text-muted); font-weight:normal;">(${match.year || 'N/A'})</span></div>
             <div class="query-tag">Recherche originale : "${originalQuery}"</div>
@@ -313,13 +373,62 @@
             <button onclick="addToList('${match.ids.trakt}', '${LIST_1_SLUG}', this)">${LIST_1_LABEL}</button>
             <button onclick="addToList('${match.ids.trakt}', '${LIST_2_SLUG}', this)">${LIST_2_LABEL}</button>
             <button onclick="addToList('${match.ids.trakt}', '${LIST_3_SLUG}', this)">${LIST_3_LABEL}</button>
-            <button class="btn-secondary" onclick="this.closest('.movie-card').remove()">Non exact</button>
+            <button class="btn-secondary" onclick="markAsUnmatched('${escapeHtml(originalQuery)}', this)">Non exact</button>
           </div>
         `;
       }
       document.getElementById('results').appendChild(div);
     }
 
+    // Helper pour générer un placeholder dynamique si l'image échoue
+    function createPlaceholder() {
+      const el = document.createElement('div');
+      el.className = 'poster-placeholder';
+      el.innerText = 'Sans image';
+      return el;
+    }
+
+    // Pour obtenir le poster TMDB directement via l'ID TMDB que Trakt renvoie
+    function getTmdbPosterPath(movie) {
+      // Trakt renvoie parfois le poster via tmdb id direct
+      return movie.ids.tmdb ? `/${movie.ids.tmdb}.jpg` : ''; 
+    }
+
+    function escapeHtml(str) {
+      return str.replace(/'/g, "\\'").replace(/"/g, "&quot;");
+    }
+
+    // Gestion de la liste des non-exacts
+    function markAsUnmatched(originalTitle, btnElement) {
+      addUnmatched(originalTitle);
+      btnElement.closest('.movie-card').remove();
+    }
+
+    function addUnmatched(title) {
+      unmatchedMovies.add(title);
+      updateUnmatchedTextarea();
+    }
+
+    function updateUnmatchedTextarea() {
+      const arr = Array.from(unmatchedMovies);
+      document.getElementById('unmatched-list').value = arr.join('\n');
+      document.getElementById('unmatched-count').innerText = arr.length;
+    }
+
+    function copyUnmatched() {
+      const textarea = document.getElementById('unmatched-list');
+      if (!textarea.value.trim()) return;
+      
+      textarea.select();
+      navigator.clipboard.writeText(textarea.value);
+      
+      const copyBtn = document.getElementById('copy-btn');
+      const originalText = copyBtn.innerText;
+      copyBtn.innerText = "Copié !";
+      setTimeout(() => copyBtn.innerText = originalText, 2000);
+    }
+
+    // Requête d'ajout à Trakt
     async function addToList(traktId, listSlug, btnElement) {
       const token = localStorage.getItem('trakt_token');
       
